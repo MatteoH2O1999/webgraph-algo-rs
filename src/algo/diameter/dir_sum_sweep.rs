@@ -152,6 +152,50 @@ impl<'a, G: RandomAccessGraph + Sync>
 impl<'a, G: RandomAccessGraph + Sync, C: StronglyConnectedComponents<G> + Sync>
     SumSweepDirectedDiameterRadius<'a, G, C>
 {
+    fn delta_debug(&self, pl: impl ProgressLog, message: std::fmt::Arguments) {
+        pl.info(format_args!("Delta debug: {}", message));
+        pl.info(format_args!(
+            "Delta debug: forwards upper bounds -> {:?}",
+            self.upper_bound_forward_eccentricities.as_slice()
+        ));
+        pl.info(format_args!(
+            "Delta debug: forwards lower bounds -> {:?}",
+            self.lower_bound_forward_eccentricities.as_slice()
+        ));
+        pl.info(format_args!(
+            "Delta debug: backward upper bounds -> {:?}",
+            self.upper_bound_backward_eccentricities.as_slice()
+        ));
+        pl.info(format_args!(
+            "Delta debug: backward lower bounds -> {:?}",
+            self.lower_bound_backward_eccentricities.as_slice()
+        ));
+        pl.info(format_args!(
+            "Delta debug: forwards total distance -> {:?}",
+            self.total_forward_distance.as_slice()
+        ));
+        pl.info(format_args!(
+            "Delta debug: backward total distance -> {:?}",
+            self.total_backward_distance.as_slice()
+        ));
+
+        let to_complete_f = (0..self.number_of_nodes)
+            .map(|v| self.incomplete_forward_vertex(v))
+            .collect::<Vec<_>>();
+        let to_complete_b = (0..self.number_of_nodes)
+            .map(|v| self.incomplete_backward_vertex(v))
+            .collect::<Vec<_>>();
+
+        pl.info(format_args!(
+            "Delta debug: incomplete forwards vertices -> {:?}",
+            to_complete_f
+        ));
+        pl.info(format_args!(
+            "Delta debug: incomplete backward vertices -> {:?}",
+            to_complete_b
+        ));
+    }
+
     fn incomplete_forward_vertex(&self, index: usize) -> bool {
         self.lower_bound_forward_eccentricities[index]
             != self.upper_bound_forward_eccentricities[index]
@@ -613,6 +657,8 @@ impl<'a, G: RandomAccessGraph + Sync, C: StronglyConnectedComponents<G> + Sync>
         }
         let start = start.unwrap();
 
+        self.delta_debug(pl.clone(), format_args!("BFS from {}", start));
+
         pl.item_name("nodes");
         pl.display_memory(false);
         pl.expected_updates(None);
@@ -720,6 +766,8 @@ impl<'a, G: RandomAccessGraph + Sync, C: StronglyConnectedComponents<G> + Sync>
 
         pl.done();
 
+        self.delta_debug(pl.clone(), format_args!("BFS from {} completed", start));
+
         Ok(())
     }
 
@@ -818,6 +866,11 @@ impl<'a, G: RandomAccessGraph + Sync, C: StronglyConnectedComponents<G> + Sync>
     /// method to log the progress. If `Option::<dsi_progress_logger::ProgressLogger>::None` is
     /// passed, logging code should be optimized away by the compiler.
     fn all_cc_upper_bound(&mut self, pivot: Vec<usize>, mut pl: impl ProgressLog) -> Result<()> {
+        self.delta_debug(
+            pl.clone(),
+            format_args!("AllCCUpperBound with pivots {:?}", pivot),
+        );
+
         pl.item_name("elements");
         pl.display_memory(false);
         pl.expected_updates(Some(
@@ -930,6 +983,11 @@ impl<'a, G: RandomAccessGraph + Sync, C: StronglyConnectedComponents<G> + Sync>
         self.iterations += 3;
 
         pl.done();
+
+        self.delta_debug(
+            pl.clone(),
+            format_args!("Completed AllCCUpperBound with pivots {:?}", pivot),
+        );
 
         Ok(())
     }

@@ -1,6 +1,5 @@
 use anyhow::Result;
 use dsi_progress_logger::{ProgressLog, ProgressLogger};
-use std::path::Path;
 use webgraph::graphs::BVGraph;
 use webgraph_algo::algo::diameter::*;
 use webgraph_algo::prelude::*;
@@ -16,10 +15,6 @@ fn main() -> Result<()> {
     let main_pl = ProgressLogger::default();
     main_pl.info(format_args!("Starting test..."));
 
-    let mut flags = MmapFlags::empty();
-    flags.set(MmapFlags::SHARED, true);
-    flags.set(MmapFlags::RANDOM_ACCESS, true);
-
     let mut sum_sweep_pl = ProgressLogger::default();
     sum_sweep_pl
         .display_memory(true)
@@ -30,7 +25,7 @@ fn main() -> Result<()> {
         &reversed_graph,
         SumSweepOutputLevel::RadiusDiameter,
         None,
-        TempMmapOptions::CustomDir(Path::new("./graphs").to_owned(), flags),
+        TempMmapOptions::None,
         sum_sweep_pl.clone(),
     )?;
     sum_sweep.compute(sum_sweep_pl)?;
