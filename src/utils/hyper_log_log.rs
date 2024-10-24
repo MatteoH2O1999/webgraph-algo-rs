@@ -601,8 +601,8 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
 
         let msb_mask = self.counter_array.msb_mask.as_slice();
         let lsb_mask = self.counter_array.lsb_mask.as_slice();
-        let x = match &mut self.cached_bits {
-            Some((bits, _)) => bits.as_mut_slice(),
+        let (x, mut changed) = match &mut self.cached_bits {
+            Some((bits, c)) => (bits.as_mut_slice(), *c),
             None => {
                 let bits_offset = self.offset * self.counter_array.register_size;
                 // Counters should be byte-aligned
@@ -616,7 +616,7 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
                     (other.counter_array.bits.as_slice().as_ptr() as *mut W).byte_add(byte_offset);
                 debug_assert!(pointer.is_aligned());
 
-                std::slice::from_raw_parts_mut(pointer, num_words)
+                (std::slice::from_raw_parts_mut(pointer, num_words), false)
             }
         };
         let (acc, mask) = if let Some(helper) = &mut self.thread_helper {
@@ -744,28 +744,39 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
         *mask_last = (*mask_last | msb_last) ^ acc_last;
 
         // Finally, we use mask to select the right bits from x and y and store the result.
-        let mut changed = false;
-        x_slice
-            .iter_mut()
-            .zip(y_slice.iter())
-            .zip(mask_slice.iter())
-            .for_each(|((x_word, &y_word), mask_word)| {
-                let new_x_word = *x_word ^ ((*x_word ^ y_word) & mask_word);
-                if new_x_word != *x_word {
-                    changed = true;
-                    *x_word = new_x_word;
-                }
-            });
-        let new_x_last = (*x_last & !last_word_mask)
-            | (x_last_masked ^ ((x_last_masked ^ y_last_masked) & *mask_last));
-        if new_x_last != *x_last {
-            changed = true;
-            *x_last = new_x_last;
-        }
-
         if changed {
-            if let Some((_, cache_changed)) = self.cached_bits.as_mut() {
-                *cache_changed = changed;
+            x_slice
+                .iter_mut()
+                .zip(y_slice.iter())
+                .zip(mask_slice.iter())
+                .for_each(|((x_word, &y_word), mask_word)| {
+                    *x_word = *x_word ^ ((*x_word ^ y_word) & mask_word);
+                });
+            *x_last = (*x_last & !last_word_mask)
+                | (x_last_masked ^ ((x_last_masked ^ y_last_masked) & *mask_last));
+        } else {
+            x_slice
+                .iter_mut()
+                .zip(y_slice.iter())
+                .zip(mask_slice.iter())
+                .for_each(|((x_word, &y_word), mask_word)| {
+                    let new_x_word = *x_word ^ ((*x_word ^ y_word) & mask_word);
+                    if new_x_word != *x_word {
+                        changed = true;
+                        *x_word = new_x_word;
+                    }
+                });
+            let new_x_last = (*x_last & !last_word_mask)
+                | (x_last_masked ^ ((x_last_masked ^ y_last_masked) & *mask_last));
+            if new_x_last != *x_last {
+                changed = true;
+                *x_last = new_x_last;
+            }
+
+            if changed {
+                if let Some((_, cache_changed)) = self.cached_bits.as_mut() {
+                    *cache_changed = changed;
+                }
             }
         }
 
