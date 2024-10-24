@@ -14,7 +14,7 @@ const REQUIRED_TRIALS: u64 = 90;
 #[test]
 fn test_single() -> Result<()> {
     let sizes = [1, 10, 100, 1000, 100_000];
-    let log2ms = [6, 8, 12];
+    let log2ms = [4, 6, 8, 12];
 
     for size in sizes {
         for log2m in log2ms {
@@ -23,6 +23,7 @@ fn test_single() -> Result<()> {
 
             for trial in 0..NUM_TRIALS {
                 let counters = HyperLogLogCounterArrayBuilder::new()
+                    .word_type::<u16>()
                     .log_2_num_registers(log2m)
                     .num_elements_upper_bound(size)
                     .hasher_builder(Xxh3Builder::new().with_seed(trial))
@@ -69,6 +70,7 @@ fn test_double() -> Result<()> {
 
             for trial in 0..NUM_TRIALS {
                 let counters = HyperLogLogCounterArrayBuilder::new()
+                    .word_type::<u16>()
                     .log_2_num_registers(log2m)
                     .num_elements_upper_bound(size)
                     .hasher_builder(Xxh3Builder::new().with_seed(trial))
@@ -130,6 +132,7 @@ fn test_merge_safe() -> Result<()> {
 
             for trial in 0..NUM_TRIALS {
                 let counters = HyperLogLogCounterArrayBuilder::new()
+                    .word_type::<u16>()
                     .log_2_num_registers(log2m)
                     .num_elements_upper_bound(size)
                     .hasher_builder(Xxh3Builder::new().with_seed(trial))
@@ -196,6 +199,7 @@ fn test_merge_unsafe() -> Result<()> {
 
             for trial in 0..NUM_TRIALS {
                 let counters = HyperLogLogCounterArrayBuilder::new()
+                    .word_type::<u16>()
                     .log_2_num_registers(log2m)
                     .num_elements_upper_bound(size)
                     .hasher_builder(Xxh3Builder::new().with_seed(trial))

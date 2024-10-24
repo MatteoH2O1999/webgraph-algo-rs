@@ -1,5 +1,5 @@
 use crate::{prelude::*, utils::MmapSlice};
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use common_traits::*;
 use rayon::prelude::*;
 use std::{
@@ -10,6 +10,21 @@ use std::{
 use sux::prelude::*;
 
 type HashResult = u64;
+
+fn min_alignment(bits: usize) -> String {
+    if bits % 128 == 0 {
+        "u128"
+    } else if bits % 64 == 0 {
+        "u64"
+    } else if bits % 32 == 0 {
+        "u32"
+    } else if bits % 16 == 0 {
+        "u16"
+    } else {
+        "u8"
+    }
+    .to_string()
+}
 
 /// Builder for [`HyperLogLogCounterArray`].
 ///
@@ -28,7 +43,7 @@ type HashResult = u64;
 /// // Type of the counter is usually inferred if the counter is used,
 /// // otherwise it must be specified.
 /// let counter_array = HyperLogLogCounterArrayBuilder::new()
-///     .log_2_num_registers(4)
+///     .log_2_num_registers(6)
 ///     .num_elements_upper_bound(30)
 ///     .build(10)?;
 /// counter_array.get_counter(0).add(42);
@@ -36,7 +51,7 @@ type HashResult = u64;
 /// assert_eq!(counter_array.into_vec().len(), 10);
 ///
 /// let counter_array = HyperLogLogCounterArrayBuilder::new()
-///     .log_2_num_registers(4)
+///     .log_2_num_registers(6)
 ///     .num_elements_upper_bound(30)
 ///     .build::<usize>(10)?;
 ///
@@ -45,7 +60,7 @@ type HashResult = u64;
 /// // The backend can also be changed to other unsigned types.
 /// // Note that the type must be able to hold the result of the hash function.
 /// let counter_array = HyperLogLogCounterArrayBuilder::new()
-///     .log_2_num_registers(4)
+///     .log_2_num_registers(6)
 ///     .num_elements_upper_bound(30)
 ///     .word_type::<u64>()
 ///     .build::<usize>(10)?;
@@ -173,7 +188,7 @@ impl<H: BuildHasher, W: Word + IntoAtomic> HyperLogLogCounterArrayBuilder<H, W> 
         let mmap_options = self.mmap_options;
 
         // This ensures counters are at least 16-bit-aligned.
-        assert!(
+        ensure!(
             log_2_num_registers >= 4,
             "the logarithm of the number of registers per counter should be at least 4. Got {}",
             log_2_num_registers
@@ -198,19 +213,13 @@ impl<H: BuildHasher, W: Word + IntoAtomic> HyperLogLogCounterArrayBuilder<H, W> 
         });
 
         let counter_size_in_bits = number_of_registers * register_size;
-        let mut chunk_size = 1;
-        while (counter_size_in_bits * chunk_size) % W::BITS != 0 {
-            chunk_size += 1;
-        }
-        // Chuk size should always be a power of 2
-        debug_assert_eq!(chunk_size.count_ones(), 1);
-        let log_2_chunk_size = chunk_size.ilog2().try_into().unwrap_or_else(|_| {
-            panic!(
-                "should be able to convert {} from u32 to usize",
-                chunk_size.ilog2()
-            )
-        });
-        debug_assert_eq!(1_usize << log_2_chunk_size, chunk_size);
+
+        // This ensures counters are always aligned to W
+        ensure!(
+            counter_size_in_bits % W::BITS == 0,
+            "W should allow counters to be aligned. Use {} or smaller words",
+            min_alignment(counter_size_in_bits)
+        );
 
         let mut msb = BitFieldVec::new(register_size, number_of_registers);
         let mut lsb = BitFieldVec::new(register_size, number_of_registers);
@@ -221,15 +230,10 @@ impl<H: BuildHasher, W: Word + IntoAtomic> HyperLogLogCounterArrayBuilder<H, W> 
             lsb.set(i, lsb_w);
         }
 
-        let mut required_words = std::cmp::max(
+        let required_words = std::cmp::max(
             1,
             (number_of_registers * num_counters * register_size + W::BITS - 1) / W::BITS,
         );
-        if chunk_size > 1 {
-            // This allows cache to copy non-aligned words without having to check whether the backend
-            // is long enough.
-            required_words += 1;
-        }
         let bits_vec =
             MmapSlice::from_closure(|| W::AtomicType::new(W::ZERO), required_words, mmap_options)
                 .with_context(|| "Could not create bits for hyperloglog array as MmapSlice")?;
@@ -263,9 +267,6 @@ impl<H: BuildHasher, W: Word + IntoAtomic> HyperLogLogCounterArrayBuilder<H, W> 
             alpha_m_m: alpha * (number_of_registers as f64).powi(2),
             sentinel_mask,
             hasher_builder,
-            chunk_size,
-            chunk_size_minus_1: chunk_size - 1,
-            log_2_chunk_size,
             msb_mask: msb,
             lsb_mask: lsb,
             residual_mask,
@@ -313,12 +314,6 @@ pub struct HyperLogLogCounterArray<
     sentinel_mask: HashResult,
     /// The builder of the hashers
     hasher_builder: H,
-    /// The number of counters needed for a chunk to be aliged with `W`
-    chunk_size: usize,
-    /// The number of counters needed for a chunk to be aliged with `W` minus 1
-    chunk_size_minus_1: usize,
-    /// The *log<sub>2</sub>* of the chunk size
-    log_2_chunk_size: usize,
     /// A mask containing a one in the most significant bit of each register
     msb_mask: BitFieldVec<W>,
     /// A mask containing a one in the least significant bit of each register
@@ -396,7 +391,6 @@ impl<T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounterArray<T, W, H> {
         ThreadHelper {
             acc: Vec::with_capacity(self.words_per_counter()),
             mask: Vec::with_capacity(self.words_per_counter()),
-            y: vec![W::ZERO; self.words_per_counter()],
         }
     }
 
@@ -434,12 +428,6 @@ impl<T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounterArray<T, W, H> {
     pub fn log_2_num_registers(&self) -> usize {
         self.log_2_num_registers
     }
-
-    /// Returns the chunk size for the array.
-    #[inline(always)]
-    pub fn chunk_size(&self) -> usize {
-        self.chunk_size
-    }
 }
 
 impl<T: Sync, W: Word + IntoAtomic, H: BuildHasher + Sync> HyperLogLogCounterArray<T, W, H> {
@@ -458,7 +446,6 @@ impl<T: Sync, W: Word + IntoAtomic, H: BuildHasher + Sync> HyperLogLogCounterArr
 pub struct ThreadHelper<W: Word + IntoAtomic> {
     acc: Vec<W>,
     mask: Vec<W>,
-    y: Vec<W>,
 }
 
 /// Concretized counter for [`HyperLogLogCounterArray`].
@@ -489,21 +476,6 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
     pub fn counter_index(&self) -> usize {
         // self.offset / self.counter_array.num_registers
         self.offset >> self.counter_array.log_2_num_registers
-    }
-
-    /// Returns the chunk this counter belongs to.
-    #[inline(always)]
-    pub fn chunk_index(&self) -> usize {
-        // self.counter_index() / self.counter_array.chunk_size
-        self.counter_index() >> self.counter_array.log_2_chunk_size
-    }
-
-    /// Returns whether the counter is the last of a chunk and needs to be updated without overlapping
-    /// the next. This is used by [`Self::merge_unsafe`].
-    #[inline(always)]
-    pub fn is_last_of_chunk(&self) -> bool {
-        self.counter_index() % self.counter_array.chunk_size
-            == self.counter_array.chunk_size_minus_1
     }
 
     /// Returns whether the counter's cache has been modified and should be committed to the backend.
@@ -556,9 +528,6 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
     /// * `other`: the counter to merge into `self`.
     ///
     /// # Safety
-    ///
-    /// Calling this method on two non-cached counters from the same chunk from two
-    /// different threads at the same time is [undefined behavior].
     ///
     /// Calling this method while reading (ie. with [`Self::cache`] on the same counter from
     /// another instance) or writing (ie. with [`Self::commit_changes`]) from the same memory
@@ -620,13 +589,7 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
     ///
     /// [undefined behavior]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
     pub unsafe fn merge_unsafe(&mut self, other: &Self) -> bool {
-        // Whether to call Self::commit_changes at the end because
-        // the counter was cached here.
-        // This is sound as the mut ref prevents other references from
-        // existing.
-        let mut commit = false;
         // The temporary vectors if no thread helper is used
-        let mut y_vec_internal;
         let mut acc_internal;
         let mut mask_internal;
 
@@ -651,29 +614,19 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
 
                 let pointer =
                     (other.counter_array.bits.as_slice().as_ptr() as *mut W).byte_add(byte_offset);
+                debug_assert!(pointer.is_aligned());
 
-                if pointer.is_aligned() {
-                    std::slice::from_raw_parts_mut(pointer, num_words)
-                } else {
-                    self.cache();
-                    commit = true;
-                    self.cached_bits
-                        .as_mut()
-                        .expect("Counter should be cached")
-                        .0
-                        .as_mut_slice()
-                }
+                std::slice::from_raw_parts_mut(pointer, num_words)
             }
         };
-        let (y_vec, acc, mask) = if let Some(helper) = &mut self.thread_helper {
+        let (acc, mask) = if let Some(helper) = &mut self.thread_helper {
             helper.acc.set_len(0);
             helper.mask.set_len(0);
-            (&mut helper.y, &mut helper.acc, &mut helper.mask)
+            (&mut helper.acc, &mut helper.mask)
         } else {
-            y_vec_internal = Vec::with_capacity(num_words);
             acc_internal = Vec::with_capacity(num_words);
             mask_internal = Vec::with_capacity(num_words);
-            (&mut y_vec_internal, &mut acc_internal, &mut mask_internal)
+            (&mut acc_internal, &mut mask_internal)
         };
         let y = match &other.cached_bits {
             Some((bits, _)) => bits.as_slice(),
@@ -688,19 +641,9 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
 
                 let pointer = (other.counter_array.bits.as_slice().as_ptr() as *const W)
                     .byte_add(byte_offset);
+                debug_assert!(pointer.is_aligned());
 
-                if pointer.is_aligned() {
-                    std::slice::from_raw_parts(pointer, num_words)
-                } else {
-                    std::ptr::copy_nonoverlapping(
-                        pointer as *const u8,
-                        y_vec.as_mut_ptr() as *mut u8,
-                        num_bytes,
-                    );
-                    y_vec.set_len(num_words);
-
-                    y_vec.as_slice()
-                }
+                std::slice::from_raw_parts(pointer, num_words)
             }
         };
 
@@ -821,13 +764,9 @@ impl<'a, T, W: Word + IntoAtomic, H: BuildHasher> HyperLogLogCounter<'a, T, W, H
         }
 
         if changed {
-            if commit {
-                self.commit_changes(false);
-            } else if let Some((_, cache_changed)) = self.cached_bits.as_mut() {
+            if let Some((_, cache_changed)) = self.cached_bits.as_mut() {
                 *cache_changed = changed;
             }
-        } else if commit {
-            self.cached_bits = None;
         }
 
         changed
