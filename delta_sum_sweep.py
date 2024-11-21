@@ -78,6 +78,8 @@ for graph in graphs:
             if "Delta debug: " in line:
                 java_lines.append(line.split("Delta debug: ")[1])
 
+        assert len(java_lines) > 0
+        assert len(rust_lines) > 0
         assert len(java_lines) == len(rust_lines), f"{len(java_lines)} != {len(rust_lines)}"
         
         for java_line, rust_line in zip(java_lines, rust_lines):
